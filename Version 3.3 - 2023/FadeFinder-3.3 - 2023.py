@@ -24,7 +24,6 @@ pd.options.mode.chained_assignment = None  # default='warn'
 def timezone_convert(time):
     return time.replace(tzinfo=tz.UTC).astimezone(tz.gettz('America/New_York'))
 
-
 # 2 -------------- Connect to local postgresql db - Set up test universe - --------------------
 try:
     engine = sqlalchemy.create_engine('postgresql+psycopg2://postgres:postgres@localhost:5432/US_Listed')
@@ -40,7 +39,11 @@ with open(path, "rb") as f:
 
 # 3 -------------------- Parameters for the backtest---------------------
 #used to have both startdate and enddate in string form - why?
-startdate = datetime.datetime.strptime("2018-08-01",'%Y-%m-%d').date()
+
+# Note to self: måske lav en funktion til automatisk at finde seneste dato med et setup -> og så altid køre for et
+# fast prisinterval -> slipper for at holde styr på hvilke pris intervaller er kørt for hvilke dato-intervaller
+
+startdate = datetime.datetime.strptime("2023-10-12",'%Y-%m-%d').date()
 enddate = datetime.date.today()
 #enddate = datetime.date.today().strftime('%Y-%m-%d')
 
@@ -52,7 +55,7 @@ direction = "short"  # "short" / "long"
 # Indicators: 0=off, 1=on
 PriceChangeFilter = 1  # Change from close to open in percentage
 PriceChangeMinSetting = 20
-PriceChangeMaxSetting = 5000
+PriceChangeMaxSetting = 9999
 
 RVOLfilter = 0  # Relative volume
 RVOLSetting = 0
@@ -61,7 +64,7 @@ VolumeFilter = 1 # introduces hindsight bias - used as a proxy since prevolume i
 VolumeSetting = 200_000
 
 PreVolFilter = 1
-PreVolSetting = 500_000
+PreVolSetting = 200_000
 
 DollarVolfilter = 0  # Absolute volume to secure liquidity
 DollarVolSetting = 00_000
@@ -70,7 +73,7 @@ PercentileFilter = 0  # Close in percentile of day's range
 PercentileSetting = 50
 
 SharePriceFilter = 1  # Exclude the cheapest stocks - possibly redundant when based on adj. data
-SharePriceSetting = [0.2, 0.5]
+SharePriceSetting = [0.2, 9999]
 
 MarketCapFilter = 1 # Calculated from close of previous day
 MarketCapSetting = 999_000_000
@@ -246,11 +249,10 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
         logging.debug(f"No trade signals for stock: {stock}")
         pass
 
-
 # 5 ------------------------- Initiate the backtest ------------------------
 
 # Testing partial list is effective for testing and for runtime estimation
-ticker_list = ticker_list[200:-1]
+ticker_list = ticker_list[0:-1]
 #ticker_list = ["SNOA"] #ACMR
 
 timemeasure = time.perf_counter()
@@ -373,7 +375,7 @@ try:
     current_time = datetime.datetime.now().strftime("%d.%m.%Y-%H.%M.%S")
 
     # needs to backslashes at the end - to escape the final backslash
-    folder_path = r"C:\Users\Simon\OneDrive\01 Data Partition\04 Programmering\04 Python Programmering\PycharmProjects\SR-Polygon\FadeFinder\Output filer\\"
+    folder_path = r"C:\Users\Simon\OneDrive\01 Data Partition\04 Programmering\04 Python Programmering\PycharmProjects\FadeFinder\Output filer\\"
 
     with pd.ExcelWriter(f"{folder_path}FadeFinderOutput_{current_time}.xlsx") as writer:
         resultsdataframe.to_excel(writer, index=False)
