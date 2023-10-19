@@ -375,7 +375,7 @@ try:
     current_time = datetime.datetime.now().strftime("%d.%m.%Y-%H.%M.%S")
 
     # needs to backslashes at the end - to escape the final backslash
-    folder_path = r"C:\Users\Simon\OneDrive\01 Data Partition\04 Programmering\04 Python Programmering\PycharmProjects\FadeFinder\Output filer\\"
+    folder_path = r"/Output filer\\"
 
     with pd.ExcelWriter(f"{folder_path}FadeFinderOutput_{current_time}.xlsx") as writer:
         resultsdataframe.to_excel(writer, index=False)
