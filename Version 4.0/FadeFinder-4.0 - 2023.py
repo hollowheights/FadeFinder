@@ -1,6 +1,3 @@
-#--- This version is started on 9.02.2023, first update to the program since summer 2022 ---
-#Major changes: now using postgres instead of SQLite+feather - reflected in ticker list creation and in load of data
-
 # 1 --- IMPORTS AND SIMILAR ---#
 import pandas as pd
 import numpy as np
@@ -24,6 +21,10 @@ pd.options.mode.chained_assignment = None  # default='warn'
 def timezone_convert(time):
     return time.replace(tzinfo=tz.UTC).astimezone(tz.gettz('America/New_York'))
 
+def pct_chg(x2, x1):
+    """X2 is the latest value, and X1 is the initial value"""
+    return ((x2 - x1) / x1) * 100
+
 # 2 -------------- Connect to local postgresql db - Set up test universe - --------------------
 try:
     engine = sqlalchemy.create_engine('postgresql+psycopg2://postgres:postgres@localhost:5432/US_Listed')
@@ -38,19 +39,21 @@ with open(path, "rb") as f:
 
 
 # 3 -------------------- Parameters for the backtest---------------------
-#used to have both startdate and enddate in string form - why?
 
-# Note to self: måske lav en funktion til automatisk at finde seneste dato med et setup -> og så altid køre for et
-# fast prisinterval -> slipper for at holde styr på hvilke pris intervaller er kørt for hvilke dato-intervaller
+# Set a subsection of tickers to test or default to all
+ticker_list = ticker_list[0:-1]
+#ticker_list = ["SNOA"]
 
 startdate = datetime.datetime.strptime("2023-10-12",'%Y-%m-%d').date()
 enddate = datetime.date.today()
 #enddate = datetime.date.today().strftime('%Y-%m-%d')
 
 Signalperiod = "gap"  #"gap" / "day"
+direction = "short"  # "short" / "long"
+
+#NOT USED CURRENTLY
 Exposure = 0.1  #percentage of portfolio to use for each trade
 Fees = 0.000  #Percentage - 1=100% - Currently 0 and added/adjusted in Jupyter Notebook
-direction = "short"  # "short" / "long"
 
 # Indicators: 0=off, 1=on
 PriceChangeFilter = 1  # Change from close to open in percentage
@@ -72,7 +75,7 @@ DollarVolSetting = 00_000
 PercentileFilter = 0  # Close in percentile of day's range
 PercentileSetting = 50
 
-SharePriceFilter = 1  # Exclude the cheapest stocks - possibly redundant when based on adj. data
+SharePriceFilter = 1  # Exclude the cheapest stocks
 SharePriceSetting = [0.2, 9999]
 
 MarketCapFilter = 1 # Calculated from close of previous day
@@ -81,7 +84,7 @@ MarketCapSetting = 999_000_000
 
 # 4 ------------------- Definition of main functions ----------------------------------
 
-#This functino is called from TradeFunctionDaily when a signal is found
+#This function is called from TradeFunctionDaily when a trade signal is found
 def TradeFunctionIntraday(stock, date): #takes a stock symbol (string) and a datetime instance
     logging.debug(f"Starting intraday function for ticker: {stock}")
 
@@ -143,15 +146,26 @@ resultspartialdataframes = []  # storage list to build 'resultsdataframe' from
 failedstocks = []  # storage list symbols of stocks with data errors
 failedstocks_intraday = []
 
+
 def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for column definitions
     logging.debug(f"starting TradeFunctionDaily for {stock}")
 
-    # Initialize dataframe with daily data -
+    # Load in data from local db + initialize dataframe with daily data
     query = f"SELECT * FROM daily WHERE UPPER(\"Stock\") = '{stock}' AND \"Date\" BETWEEN '{startdate}' AND '{enddate}'"
-
     df = pd.read_sql_query(query, con=engine, parse_dates=True)
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values(by="Date")
+    df['GapSize'] = pct_chg(df.Open, df.Close.shift(1) )
+
+    # Add a (modified) True Range column
+    # should be changed over time - maybe a separate column for 'gain' to allow for more filtering in backtesting
+    # find a better name also
+    df['TrueRange_mod'] = max( pct_chg(df['High'], df['Close'].shift(1)), pct_chg(df['High'], df['Low']) )
+
+    #Determine setup type + add a column for prior day TR + gain
+    #ideally should return 'None' for cases with no TR data
+    df['SetupType'] = np.where(df['TrueRange_mod'].shift(1) < 20, "D1", "D2")
+
 
     # Define booleans that are invariant between long/short tests
     DollarVolParam = df.Volume.shift(1) > DollarVolSetting
@@ -163,15 +177,15 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
     if Signalperiod == "day":
         PriceChangeParam = ((df.Close - df.Open) / df.Range.mean()) > PriceChangeMinSetting
     elif Signalperiod == "gap":
-        PriceChangeMinParam = ((((df.Open - df.Close.shift(1)) / df.Close.shift(1)) * 100 ) > PriceChangeMinSetting)
-        PriceChangeMaxParam = ((((df.Open - df.Close.shift(1)) / df.Close.shift(1)) * 100 ) < PriceChangeMaxSetting)
-        PriceChangeParam = (PriceChangeMinParam & PriceChangeMaxParam)
+        PriceChangeMinParam = ((( (df.Open - df.Close.shift(1)) / df.Close.shift(1)) * 100 ) > PriceChangeMinSetting)
+        (df['setup_type'] == 'D1') & (df['GapSize'] > 20) |
+        (df['setup_type'] == 'D2')
 
         # Check that the prior trading day is less than x days back - to avoid day 1's after a stock is relisted
         # This needs adjustments if using signalperiod 'day'
-        DaysBreakParam = np.where((df.Date-df.Date.shift(1)) < datetime.timedelta(days=7), 1, 0)
+        DaysBreakParam = np.where((df.Date - df.Date.shift(1)) < datetime.timedelta(days=7), 1, 0)
 
-    # Define columns based on the above params -> this is for debugging not for actual filtering (params used directly)
+    # Define columns based on the above params for debugging - for actual filtering params are used directly
     df["PriceChangeParam"] = np.where((PriceChangeParam), 1, 0)
     df["VolumeParam"] = np.where(VolumeParam, 1, 0)
     df["SharePriceParam"] = np.where(SharePriceParam, 1, 0)
@@ -179,12 +193,12 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
     df["DaysBreakParam"] = np.where(DaysBreakParam, 1, 0)
 
     #Define combined filter condition for tradesignal and flag all days with a signal
-    TradeSignalParam = (PriceChangeParam & VolumeParam & SharePriceParam & MarketCapParam & DaysBreakParam) == True
+    TradeSignalParam = (PriceChangeMinParam & VolumeParam & SharePriceParam & MarketCapParam & DaysBreakParam) == True
     df["TradeSignal"] = np.where(TradeSignalParam, 1, 0)
+
 
     # Calculate basic numbers for signal days - reminder about shift: positive number = back in time (ascending order)
     if Signalperiod == "gap":
-        df["GapSize"] = np.where(TradeSignalParam, ((df.Open / df.Close.shift(1)) - 1)*100, 0)
         df["GapSizeRel"] = np.where(TradeSignalParam, df.GapSize / df.Range.mean(), 0) #tilføj evt vægtet gns af range
         df["GapSizeAbs"] = np.where(TradeSignalParam, df.OpenUnadjusted - df.CloseUnadjusted.shift(1),0)
         df["RVOL10D"] = np.where(TradeSignalParam, df.Volume/df.AvgVolume10D,0) #OBS RVOL premarket er mere aktuelt
@@ -250,10 +264,7 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
         pass
 
 # 5 ------------------------- Initiate the backtest ------------------------
-
-# Testing partial list is effective for testing and for runtime estimation
-ticker_list = ticker_list[0:-1]
-#ticker_list = ["SNOA"] #ACMR
+# [settings for tickers to test have been moved to the top of the script]
 
 timemeasure = time.perf_counter()
 
@@ -263,14 +274,14 @@ with concurrent.futures.ThreadPoolExecutor(5) as executor:  # 5 threads seem to 
 #cProfile - not in use currently
 # with cProfile.Profile() as pr:
 #     for result in map(TradeFunctionDaily, ticker_list):
-#         pass  # You can perform any operation with the result here if needed
+#         pass
 
 # stats = pstats.Stats(pr)
 # stats.sort_stats(pstats.SortKey.TIME)
 # stats.print_stats()
 
 
-# 6 ---------------------Set up  dataframe for results----------------------------
+# 6 ---------------------Set up the dataframe for results----------------------------
 
 #create 'resultsdataframe'
 if len(resultspartialdataframes) > 0:
