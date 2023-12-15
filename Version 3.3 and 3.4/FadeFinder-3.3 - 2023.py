@@ -8,17 +8,19 @@ import time
 import datetime
 from dateutil import tz
 from pandas.tseries.offsets import BDay #used in intraday func
-import sqlalchemy
-from sqlalchemy import create_engine, text
 import pickle
 import logging
-import concurrent.futures
-#from scipy.stats.mstats import gmean
+import os
 import cProfile
 import pstats
-import multiprocessing
-from multiprocessing import Manager
 
+import concurrent
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+#import concurrent.futures
+
+import sqlalchemy
+from sqlalchemy import create_engine, text
 
 logging.basicConfig(level=logging.DEBUG) # possible values include: "DEBUG", "CRITICAL" (always in caps)
 pd.set_option("display.max_rows", 1000, "display.min_rows", 200, "display.max_columns", None, "display.width", None)
@@ -29,9 +31,12 @@ def timezone_convert(time):
 
 # 2 -------------- Connect to local postgresql db - Set up test universe - --------------------
 try:
-    engine = sqlalchemy.create_engine('postgresql+psycopg2://postgres:postgres@localhost:5432/US_Listed')
+    engine = sqlalchemy.create_engine('postgresql+psycopg2://postgres:postgres@localhost:5432/US_Listed', pool_size=20,max_overflow=20)
 except:
     logging.critical("Database not accessible currently")
+
+# Create a scoped session for managing database interactions
+#Session = scoped_session(sessionmaker(bind=engine))
 
 # Define ticker_list from pickle file + sort it so the order is unchanged between runs of this script
 path = r"C:\Users\Simon\OneDrive\01 Data Partition\04 Programmering\04 Python Programmering\PycharmProjects\Downloading Scripts\tickerlist.pkl"
@@ -39,6 +44,20 @@ path = r"C:\Users\Simon\OneDrive\01 Data Partition\04 Programmering\04 Python Pr
 with open(path, "rb") as f:
     ticker_list = list(pickle.load(f))
     ticker_list.sort()
+
+# -- Some stuff for loading in from logs and preparing to log new data
+# Determine the directory of the current script
+current_directory = os.path.dirname(os.path.abspath(__file__))
+filename = "excluded_stocks"
+
+# Check if a list of excluded tickers exists - load in as a set if it does
+try:
+    with open("excluded_tickers.pkl", "rb") as f:
+        existing_excluded_stocks = pickle.load(f)
+except FileNotFoundError:
+    logging.critical(f"Warning! The file {'excluded_tickers.pkl'} does not exist.")
+    existing_excluded_stocks = set()  # Define empty set
+
 
 # 3 -------------------- Parameters for the backtest---------------------
 #used to have both startdate and enddate in string form - why?
@@ -156,25 +175,33 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
     query = f"SELECT * FROM daily WHERE UPPER(\"Stock\") = '{stock}' AND \"Date\" BETWEEN '{startdate}' AND '{enddate}'"
     df = pd.read_sql_query(query, con=engine, parse_dates=True)
 
-    #Quick check to rule out stocks with MCAP > 800 M.
-    #   Convert the MarketCap column to a NumPy array + check if MCAP for all days is too high
-    MCAP_array = df['MarketCap'].to_numpy()
-    MCAP_logical = np.all(MCAP_array > 800)
+    # Quick check to disqualify irrelevant tickers
+    try:
+        #   Convert the MarketCap column to a NumPy array + check if MCAP for all days is too high
+        MCAP_array = df['MarketCap'].to_numpy()
+        MCAP_logical = np.all(MCAP_array > 800_000_000)
 
-    #   check if all gapsizes are below 20%
-    percentage_change = (df['OpenUnadjusted'] - df['PrevDayClose']) / df['OpenUnadjusted'] * 100
-    change_logical = np.all(percentage_change < 20)
+        #   check if all gapsizes are below 20%
+        percentage_change = (df['OpenUnadjusted'] - df['PrevDayClose']) / df['OpenUnadjusted'] * 100
+        change_logical = np.all(percentage_change < 20)
 
-    #   check if all prevol values are below 100k
-    Volume_array = df['Volume'].to_numpy()
-    Volume_logical = np.all(Volume_array < 500_000)
+        #   check if full day volume is below 500k - introduces a slight hindsight bias
+        Volume_array = df['Volume'].to_numpy()
+        Volume_logical = np.all(Volume_array < 500_000)
 
-    if (MCAP_logical & change_logical & Volume_logical):
-        #logging.debug(f"All MCAP values are too high. Ticker: {stock} will not be processed.")
+    except TypeError as e:
+        logging.error(f"TypeError occurred: {e}")
+        failedstocks.append(stock)  # Add the stock to the failedstocks list
+        return None  # Return None to indicate the error
+
+    if (MCAP_logical or change_logical or Volume_logical):
+        logging.critical(f"Ticker: {stock} is disqualified and will not be processed")
+
+        # exit daily function early
         return None
-    # [no need for an else statement]
 
     # Now that the stock isn't (yet) ruled out: parse dates and sort the df
+    logging.debug(f"Ticker: {stock} is not disqualified, testing now with booleans")
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values(by="Date")
 
@@ -236,14 +263,15 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
     df["2DayTrade"] = np.where(TradeSignalParam, (df["2Day"] - Fees) * Exposure, 0)
 
     #To inspect the result of each parameter, check the full dataframe - currently disabled
-    #logging.debug(df)
+    logging.debug(df)
 
     #Set up a new dataframe for only the days giving a trade signal
     df_tradesignals = df[df.TradeSignal == 1]
 
     #Add intraday data
     if len(df_tradesignals) > 0:
-        logging.debug(f"There are trade signals")
+        logging.debug(f"There are trade signals for ticker: {stock}. This is the data before adding intraday data:")
+        logging.debug(df_tradesignals)
 
         try:
             #Call intraday function and store the return value(s)
@@ -253,8 +281,10 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
             # x represents each row
             df_tradesignals[intraday_col_names] = df_tradesignals.apply(lambda x: TradeFunctionIntraday(x['Stock'], x['Date']) or [None]*12, axis=1, result_type='expand')
 
-            # filter out tradesignals with insufficient premarket volume
+            #logging.debug(f"number of tradesignals before filtering out PreVolume null values: {len(df_tradesignals)}")
+            # filter out tradesignals with insufficient premarket volume as defined in 'PreVolSetting' [200_000 at last check]
             df_tradesignals = df_tradesignals[df_tradesignals["PreVolume"].notnull()]
+            #logging.debug(f"number of tradesignals after filtering out PreVolume null values: {len(df_tradesignals)}")
 
             # Calculating the column here - when prev day is still avail. -  more robust when doing it based on the daily data than intraday
             df_tradesignals['Open/PreHigh'] = df_tradesignals['GapSize'] / (((df_tradesignals['PreHigh'] / df_tradesignals['PrevDayClose']) - 1) * 100)
@@ -265,7 +295,8 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
             # Add all trading signals to temporary storage
             resultspartialdataframes.append(df_tradesignals)
 
-            logging.critical(f"partial dataframe logged for stock: {stock}")
+            logging.critical(f"df_tradesignals for stock: {stock} appended to resultspartialdataframes. This is the data:")
+            logging.debug(df_tradesignals)
 
         except Exception as e:
             logging.critical(e)
@@ -280,38 +311,42 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
 
 # Testing partial list is effective for testing and for runtime estimation
 ticker_list = ticker_list[0:200]
+#ticker_list = ["AEON"]
 
 #list of tickers that had incomplete data - running again to see if the problems is fixed by using thread pool with 1 thread
 #ticker_list = ['ENZ', 'MKFG', 'GMBL', 'TTOO', 'LTRY', 'DUO', 'AGBA', 'PTRA', 'WE', 'FAZE', 'NEPT', 'VEDU', 'CGC', 'SXTC', 'SPRC', 'ATIF', 'AREB', 'ASNS', 'AMTI', 'CNXA', 'APRN', 'ICU', 'ALXO', 'MKUL', 'AGIL', 'SPRC', 'ALXO', 'PNT', 'GROM', 'BTTR', 'FEMY', 'ORTX', 'SOPA', 'SECO', 'RSLS', 'JAGX', 'VS', 'DXF', 'TANH', 'OPGN', 'LL', 'BCEL', 'CPHI', 'BSQR', 'CDIO', 'CISS', 'VS', 'SASI', 'BSFC', 'OBLG', 'RDHL', 'XRTX', 'LIPO', 'FAZE']
 
 timemeasure = time.perf_counter()
 
-
-with concurrent.futures.ThreadPoolExecutor(5) as executor:  # 5 threads seem to be optimal on my Thinkpad
+with ThreadPoolExecutor(max_workers=5) as executor:
     executor.map(TradeFunctionDaily, ticker_list)
 
 '''
-with concurrent.futures.ProcessPoolExecutor(4) as executor:
-    # Use the .map method to parallelize the function execution
-    results = list(executor.map(TradeFunctionDaily, ticker_list))
+#cProfile + diverse
+
+# Define your function to be profiled
+def profiled_function():
+    list(map(TradeFunctionDaily, ticker_list))
+
+with cProfile.Profile() as pr:
+    profiled_function()
+
+
+    # for result in map(TradeFunctionDaily, ticker_list):
+    #     pass  # You can perform any operation with the result here if needed
+
+stats = pstats.Stats(pr)
+stats.sort_stats(pstats.SortKey.TIME)
+stats.print_stats()
 '''
-
-
-#cProfile - not in use currently
-# with cProfile.Profile() as pr:
-#     for result in map(TradeFunctionDaily, ticker_list):
-#         pass  # You can perform any operation with the result here if needed
-
-# stats = pstats.Stats(pr)
-# stats.sort_stats(pstats.SortKey.TIME)
-# stats.print_stats()
-
 
 # 6 ---------------------Set up  dataframe for results----------------------------
 
 #create 'resultsdataframe'
 if len(resultspartialdataframes) > 0:
     resultsdataframe = pd.concat(resultspartialdataframes, ignore_index=True)
+    logging.debug("resultsdataframe is now initialized")
+    logging.debug(resultsdataframe)
 elif (len(resultspartialdataframes)) < 1:
     logging.debug("There are no instances in the analysis results. Exiting script early.")
     exit()
