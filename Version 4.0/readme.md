@@ -4,9 +4,9 @@ Status - current limitations - updated 15.12.2023
 * scriptet skal køre til ende fordi signal-loggingen først stores permanent ved afslutning, modsat af logging af hvilke dage er processeret
  
 Changes in version 4
--preprocessing properly included
-	Now starts out by checking for dates already processed - query only relevant data
--D2 implemented 
+* preprocessing properly included
+	* starts out by checking for dates already processed - query only relevant data
+* D2 implemented 
 
 The plan for version 4 was:
 * expand to more than one type of trade setup
