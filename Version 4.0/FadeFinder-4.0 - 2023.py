@@ -45,9 +45,10 @@ with open(path, "rb") as f:
 #ticker_list = ["AAXN"]
 
 
-startdate_default = pd.Timestamp("2023-09-01")
-enddate_default = pd.Timestamp("2023-11-23")
+startdate_default = pd.Timestamp("2023-12-28")
+#enddate_default = pd.Timestamp("2023-11-27")
 enddate_default = pd.Timestamp.now().normalize()
+enddate_default = pd.Timestamp("2024-01-15")
 
 direction = "short"  # Options: "short" / "long"
 
@@ -308,11 +309,15 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
     logging.debug(f"{stock} starting TradeFunctionDaily")
 
     # Determine which dates to process - if all dates are preprocessed: skip to next stock
-    analysis_dates = analysis_dates_checker(stock)
-    #analysis_dates =  pd.dater
+    #analysis_dates = analysis_dates_checker(stock)
+
+    #TEMP SECTION to let all dates pass!!!
+    startdate, enddate = startdate_default, enddate_default  # just to be able to manipulate these
+    analysis_dates = pd.date_range(startdate, enddate, freq='B')
+
     if analysis_dates is None:
         return None
-    startdate, enddate, analysis_dates, preprocessed_dates = analysis_dates
+    #startdate, enddate, analysis_dates, preprocessed_dates = analysis_dates
     logging.debug(f"startdate and enddate now set to: {startdate} and {enddate}")
 
     logging.debug(f"{stock} Now ready to load in {len(analysis_dates)} new days")
@@ -361,7 +366,7 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
 
             # Store processed dates
             logging.debug(f"{stock} Now logging the {len(analysis_dates)} new days as processed")
-            processed_dates_logger(stock, preprocessed_dates, analysis_dates)
+            #processed_dates_logger(stock, preprocessed_dates, analysis_dates)
 
         except Exception as e:
             logging.critical(e)
@@ -370,7 +375,7 @@ def TradeFunctionDaily(stock): # columns in DB Daily -> check excel file for col
 
     else:
         logging.debug(f"No trade signals for stock: {stock}")
-        processed_dates_logger(stock, preprocessed_dates, analysis_dates)
+        #processed_dates_logger(stock, preprocessed_dates, analysis_dates)
         pass
 
 # 5 ------------------------- Initiate the backtest ------------------------
